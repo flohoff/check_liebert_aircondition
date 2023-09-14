@@ -1,0 +1,514 @@
+#!/usr/bin/perl -w
+
+package SNMP;
+	use strict;
+	use Data::Dumper;
+	use Net::SNMP 6.0 qw( :snmp DEBUG_ALL ENDOFMIBVIEW );	
+
+	my $nametable={
+		"sysDescr"		=> { oid => ".1.3.6.1.2.1.1.1" },
+		"sysName"		=> { oid => ".1.3.6.1.2.1.1.5" },
+
+		"lgpSysState"			=> { oid => ".1.3.6.1.4.1.476.1.42.3.7.2.2",
+							value => 'table',
+							values => {
+								1 => "normalOperation",
+								2 => "startUp",
+								3 => "normalWithWarning",
+								4 => "normalWithAlarm",
+								5 => "abnormalOperation"
+							}
+						},
+		"lgpConditionsPresent"		=> { oid => ".1.3.6.1.4.1.476.1.42.3.2.2" },
+		"lgpSysControlOperationOnOff"	=> { oid => ".1.3.6.1.4.1.476.1.42.3.7.4.2",
+							value => 'table',
+							values => {
+								1 => "On",
+								2 => "Off"
+							}
+						},
+		"lgpFlexibleEntryDataDescription"	=> { oid => ".1.3.6.1.4.1.476.1.42.3.9.30.1.70" },
+		"lgpFlexibleEntryDataLabel"		=> { oid => ".1.3.6.1.4.1.476.1.42.3.9.20.1.10" },
+		"lgpFlexibleEntryValue"			=> { oid => ".1.3.6.1.4.1.476.1.42.3.9.20.1.20" },
+		"lgpFlexibleEntryUnitsOfMeasure"	=> { oid => ".1.3.6.1.4.1.476.1.42.3.9.20.1.30" },
+	};
+
+	sub new {
+		my ($class, $host, $community) = @_;
+
+		my $self={};
+		bless $self, $class;
+
+		$self->reversemap();
+		$self->snmp_new_session($host, $community);
+
+		return $self;
+	}
+
+	sub snmp_new_session {
+		my ($self, $host, $community) = @_;
+
+                my ($session,$error)=Net::SNMP->session(
+			Hostname => $host,
+			Version	 => 2,
+			Timeout  => 2,
+			Community => $community
+		);
+
+		$self->{netsnmp}=$session;
+	}
+
+	sub reversemap {
+		my ($self) = @_;
+		foreach my $key ( keys %{$nametable} ) {
+			my $value=$nametable->{$key};
+			$self->{reversetable}{$value->{oid}}=$key;
+		}
+	}
+
+	sub name2oid {
+		my ($self, $mixname) = @_;
+
+		my ($name, $instance) = ($mixname =~ /^([^.]+)([\d\.]*)$/);
+		my $oid=$nametable->{$name}{oid} . $instance;
+
+		#printf("Mixname $mixname Name: $name instance $instance oid $oid\n");
+
+		return $oid;
+	}
+
+	sub oid2name {
+		my ($self, $oid) = @_;
+		my ($full, $name, $instance) = $self->oid2name_all($oid);
+		return $full;
+	}
+
+	sub instance_decode_string {
+		my ($self, $instance) = @_;
+
+		# .100.97.116.97.51 = STRING: "data3"
+		my $string="";	
+		while($instance =~ s/^\.(\d+)//) {
+			$string.=chr($1);
+		}
+		return $string
+	}
+
+	sub instance_decode_uuidnum {
+		my ($self, $instance) = @_;
+		# .36.49.48.51.99.55.102.100.100.45.51.50.56.99.45.54.102.98.101.45.98.55.55.55.45.100.57.98.50.102.48.98.48.50.49.97.57.1
+		$instance =~ s/^\.//;
+		my @elem=split(/\./, $instance);
+		my $count=shift @elem;
+		my $uuid=join("", map { chr($_) } splice(@elem, 0, $count));
+
+		return sprintf('"%s".%s', $uuid, join(".", @elem));
+	}
+
+
+	sub value_decode_table {
+		my ($self, $value, $def) = @_;
+
+		my $tvalue=$def->{values}{$value};
+		if (defined($tvalue)) {
+			return { value => $value, string => $tvalue, full => sprintf("%s(%d)", $tvalue, $value) };
+		}
+
+		return { value => $value };
+	}
+
+	sub value_decode_fixup_decimal {
+		my ($self, $value, $def) = @_;
+
+		$value=~s/,//g;
+
+		return { value => $value };
+	}
+
+	sub value_decode {
+		my ($self, $name, $value) = @_;
+
+		my $def=$nametable->{$name};
+		if (!defined($def) || !defined($def->{value})) {
+			return { value => $value };
+		}
+
+		if ($def->{value} eq "table") {
+			return $self->value_decode_table($value, $def);
+		} elsif ($def->{value} eq "fixupdecimal") {
+			return $self->value_decode_fixup_decimal($value, $def);
+		}
+
+		return { value => $value };
+	}
+
+	sub instance_decode {
+		my ($self, $name, $instance) = @_;
+
+		my $def=$nametable->{$name};
+		if (!defined($def) || !defined($def->{instance})) {
+			return $instance;
+		}
+
+		if ($def->{instance} eq 'string') {
+			return $self->instance_decode_string($instance);
+		} elsif ($def->{instance} eq 'uuidnum') {
+			return $self->instance_decode_uuidnum($instance);
+		}
+
+		return $instance;
+	}
+
+	sub oid2name_all {
+		my ($self, $oid) = @_;
+
+		# We had agents which returned spaces
+		$oid =~ s/^\s+|\s+$//g;
+
+		my $instance="";
+		while(length($oid) > 1) {
+			my $name=$self->{reversetable}{$oid};
+			if (defined($name)) {
+				return ( $name . $instance, $name, $self->instance_decode($name, $instance) );
+			}
+
+			$oid =~ s/(\.\d+)$//;
+			if (!defined($1)) {
+				return( $oid, undef, undef );
+			}
+			$instance=$1 . $instance;
+		}
+		die("OID Problem: $oid $instance");
+	}
+
+	sub _parse_request {
+		my $self=shift;
+		my @request=map { $self->name2oid($_) } @_;
+		return \@request;
+	}
+
+	sub _parse_response {
+		my ($self, $roid, $error) = @_;
+
+		my $r={};
+		foreach my $k ( keys %{$roid} ) {
+			my $value=$roid->{$k};
+			my ($full, $name, $instance)=$self->oid2name_all($k);
+			$r->{$full}={ name => $name, instance => $instance, value => $self->value_decode($name, $value) };
+		}
+
+		$r->{_error}=$error;
+
+		return $r;
+	}
+	
+	sub get {
+		my ($self, @args) = @_;
+
+		my $r=$self->{netsnmp}->get_request(-varbindlist =>
+			$self->_parse_request(@args));
+
+		return $self->_parse_response($r, $self->{netsnmp}->error());
+	}
+
+	sub get_table {
+		my ($self, $base) = @_;
+
+		my $r=$self->{netsnmp}->get_table(-baseoid => $self->name2oid($base));
+		return $self->_parse_response($r, $self->{netsnmp}->error());
+	}
+
+	sub bulkwalk {
+		my ($self, $base) = @_;
+
+		my $table={};
+		my $baseoid=$self->name2oid($base);
+		my $s=$self->{netsnmp};
+
+		my %result;
+		my $lastoid=$baseoid;
+		walk: while(42) {
+			my $r=$s->get_bulk_request(
+					-varbindlist => [ $lastoid ],
+					-maxrepetitions => 8
+				);
+
+			my @oids = $s->var_bind_names();
+			if (scalar @oids == 0) {
+				last walk;
+			}
+
+			for my $oid (sort @oids) {
+				if ($s->var_bind_types()->{$oid} == ENDOFMIBVIEW) {
+					last walk;
+				}
+				if (oid_lex_cmp($lastoid, $oid) >= 0) {
+					last walk;
+				}
+				if (!oid_base_match($baseoid, $oid)) {
+					last walk;
+				}
+
+				$result{$oid}=$r->{$oid};
+
+				$lastoid = $oid
+			}
+		}
+
+		return $self->_parse_response(\%result, $self->{netsnmp}->error());
+	}
+1;
+
+package FlexEntry;
+	use strict;
+	use Data::Dumper;
+	use Clone qw/clone/;
+
+	sub new {
+		my ($class, $e) = @_;
+
+		my $self=clone($e);
+		bless $self, $class;
+
+		return $self;
+	}
+
+	sub label {
+		my ($self) = @_;
+		return $self->{lgpFlexibleEntryDataLabel}{value};
+	}
+
+	sub value {
+		my ($self) = @_;
+		return $self->{lgpFlexibleEntryValue}{value};
+	}
+
+	sub unit {
+		my ($self) = @_;
+		return $self->{lgpFlexibleEntryUnitsOfMeasure}{value};
+	}
+
+	sub unit_normalized {
+		my ($self) = @_;
+		my $unit=$self->unit();
+
+		if (!defined($unit) || $unit eq '') {
+			return "";
+		}
+
+		if ($unit =~ /deg C/i) {
+			return "C";
+		} elsif ($unit =~ /deg F/i) {
+			return "F";
+		} elsif ($unit =~ /% RH/i) {
+			return "%";
+		} elsif ($unit eq '%') {
+			return "%";
+		}
+
+		return "";
+	}
+1;
+
+package PDXPWC;
+	use strict;
+	use Net::SNMP;
+	use Data::Dumper;
+
+	sub new {
+		my ($class, $snmp) = @_;
+
+		my $self = {
+			snmp => $snmp,
+		};
+		bless $self, $class;
+
+		$self->init();
+
+		return $self;
+	}
+
+	sub init {
+		my ($self) = @_;
+
+                my $state=$self->{snmp}->get(
+                        "lgpSysState.0",
+                        "lgpConditionsPresent.0",
+			"lgpSysControlOperationOnOff.0");
+
+		if (!defined($state)) {
+			$self->{snmpfailed}=1;
+			return;
+		}
+		$self->{snmpfailed}=0;
+
+		$self->{sysstate}=$state->{"lgpSysState.0"};
+		$self->{conditionspresent}=$state->{"lgpConditionsPresent.0"};
+		$self->{controloperation}=$state->{"lgpSysControlOperationOnOff.0"};
+
+		my $labels=$self->{snmp}->bulkwalk("lgpFlexibleEntryDataLabel");
+		my $values=$self->{snmp}->bulkwalk("lgpFlexibleEntryValue");
+		my $units=$self->{snmp}->bulkwalk("lgpFlexibleEntryUnitsOfMeasure");
+
+		$self->{flexentries}=$self->merge_tables_by_instance($labels, $values, $units);
+	}
+
+	sub _flexentry_unitmatch {
+		my ($unit, $fe) = @_;
+
+		return 1 if (!defined($unit));
+		return 1 if ($unit eq '');
+		return 0 if (!defined($fe->{lgpFlexibleEntryUnitsOfMeasure}));
+		return 1 if ($unit eq $fe->{lgpFlexibleEntryUnitsOfMeasure}{value});
+
+		return 0;
+	}
+
+	sub flexentry {
+		my ($self, $labelunit) = @_;
+
+		my ($label, $unit) = ($labelunit =~ /([^|]+)\|?(.*)/);
+
+		my @e=grep { _flexentry_unitmatch($unit, $_) }
+			grep { $_->{lgpFlexibleEntryDataLabel}{value} eq $label; } 
+			grep { defined($_->{lgpFlexibleEntryDataLabel}) }
+			values %{$self->{flexentries}};
+
+	 	if (!scalar @e) {
+			return undef;
+		}
+
+		return new FlexEntry(shift @e);
+	}
+
+	sub conditionspresent {
+		my ($self) = @_;
+		return $self->{conditionspresent}{value}{value};
+	}
+
+	sub sysstate_full {
+		my ($self) = @_;
+		return $self->{sysstate}{value}{full};
+	}
+
+	sub controloperation_full {
+		my ($self) = @_;
+		return $self->{controloperation}{value}{full};
+	}
+
+	sub merge_tables_by_instance {
+		my ($self, @tables) = @_;
+
+		my $result={};
+
+		foreach my $table ( @tables ) {
+			foreach my $k ( keys %${table} ) {
+				next if ($k =~ /_error/);
+				my $v=$table->{$k};
+
+				my $i=$v->{instance};
+				$i=~s/^\.//;
+				$result->{$i}{$v->{name}}=$v->{value};
+			}
+		}
+
+		return $result;
+	}
+
+	sub read {
+		my ($self) = @_;
+
+
+	}
+
+
+
+1;
+
+package main;
+	use strict;
+	use open IO => ":encoding(utf-8)";
+	use open ':std';
+	use Data::Dumper;
+	use POSIX;
+
+	use Monitoring::Plugin;
+	use Getopt::Long::Descriptive;
+	use FindBin qw($Bin $Script);
+
+	my ($opt, $usage) = describe_options(
+		"$Script %o <some-arg>",
+		[ 'host|H=s',		"Nexenta hostname", { required => 1 } ],
+		[ 'community|C=s',	"Nexenta hostname", { default => 'public' } ],
+		[ 'timeout|t=i',	"Timeout", { default => 15 } ],
+		[ 'waterflow',		"Water Flow Loss" ],
+		[ 'debug',		"Debug"],
+		[ 'listflexentries',	"List flexible entries" ],
+		[ 'perf=s@',		"Performance metrics" ],
+		[],
+		[ 'help',               "print usage message and exit", { shortcircuit => 1 } ],
+	);
+
+	print($usage->text), exit if $opt->help;
+
+	my $np = Monitoring::Plugin->new(
+		timeout => $opt->timeout
+	);
+
+	my $snmp=new SNMP($opt->host, $opt->community);
+	my $aircon=new PDXPWC($snmp);
+
+	if ($aircon->{snmpfailed}) {
+		$np->plugin_exit( UNKNOWN, "SNMP failed" );
+	}
+
+	if ($opt->listflexentries()) {
+		my @e=sort map {
+			sprintf("%-55s %-20s %-10s", 
+				$_->{lgpFlexibleEntryDataLabel}{value} // '',
+				$_->{lgpFlexibleEntryValue}{value} // '',
+				$_->{lgpFlexibleEntryUnitsOfMeasure}{value} // '');
+			} values %{$aircon->{flexentries}};
+
+		print join("\n", @e) . "\n";
+
+		exit();
+	}
+
+	my $s=$aircon->sysstate_full();
+	my $sop=($s =~ /normalOperation|startUp/) ? OK : CRITICAL;
+	$np->add_message($sop, sprintf("system state: %s", $s));
+
+	my $c=$aircon->conditionspresent();
+	$np->add_message(($c == 0) ? OK : CRITICAL, sprintf("conditions present: %d", $c));
+
+	my $op=$aircon->controloperation_full();
+	$np->add_message(OK, sprintf("controlOperation: %s", $op));
+
+
+	if ($opt->waterflow()) {
+		my $fe=$aircon->flexentry("Chilled Water Flow Loss Status");
+		if (defined($fe)) {
+			$np->add_message(($fe->value() =~ /Flow OK/) ? OK : CRITICAL, sprintf("Water Flow Loss: %s", $fe->value()));
+		}
+	}
+
+	if ($opt->perf()) {
+		foreach my $p ( @{$opt->perf()} ) {
+			my $fe=$aircon->flexentry($p);
+
+			if (!defined($fe)) {
+				printf("Cant find perf %s\n", $p);
+			}
+
+			$np->add_perfdata(
+				label => $fe->label(),
+				value => $fe->value(),
+				uom => $fe->unit_normalized()
+			);
+		}
+	}
+
+        my ($code, $message) = $np->check_messages();
+        $np->plugin_exit( $code, $message );
+1;
