@@ -13,7 +13,7 @@ Nagios/Icinga2 check for Vertiv aka Liebert DataCenter Air Condition controllers
 
         --help                   print usage message and exit
 
-
+User **--waterflow** to monitor the waterflow alarm entry.
 
     ./check_liebert_aircondition \
             --host 172.30.128.18 \
