@@ -1,8 +1,23 @@
 
 Nagios/Icinga2 check for Vertiv aka Liebert DataCenter Air Condition controllers:
 
+    $ ./check_liebert_aircondition --help
+    check_liebert_aircondition [-CHt] [long options...] <some-arg>
+        --host STR (or -H)       Hostname
+        --community STR (or -C)  SNMP community
+        --timeout INT (or -t)    Timeout
+        --waterflow              Water Flow Loss
+        --debug                  Debug
+        --listflexentries        List flexible entries
+        --perf STR...            Performance metrics
+
+        --help                   print usage message and exit
+
+
+
     ./check_liebert_aircondition \
             --host 172.30.128.18 \
+            --waterflow \
             --community public \
             --perf "Ext Air Sensor B Temperature|deg C" \
             --perf "Supply Air Temperature|deg C" \
