@@ -438,8 +438,8 @@ package main;
 
 	my ($opt, $usage) = describe_options(
 		"$Script %o <some-arg>",
-		[ 'host|H=s',		"Nexenta hostname", { required => 1 } ],
-		[ 'community|C=s',	"Nexenta hostname", { default => 'public' } ],
+		[ 'host|H=s',		"Hostname", { required => 1 } ],
+		[ 'community|C=s',	"SNMP community", { default => 'public' } ],
 		[ 'timeout|t=i',	"Timeout", { default => 15 } ],
 		[ 'waterflow',		"Water Flow Loss" ],
 		[ 'debug',		"Debug"],
